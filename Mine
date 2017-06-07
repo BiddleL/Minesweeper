@@ -1,0 +1,352 @@
+// Emacs settings: -*- mode: Fundamental; tab-width: 4; -*-
+    2  
+    3  ////////////////////////////////////////////////////////////////////////////
+    4  //                                                                        //
+    5  // Minesweeper: Javascript                                                //
+    6  //                                                                        //
+    7  // Copyright 1998-2009, Andrew D. Birrell                                 //
+    8  //                                                                        //
+    9  // Usage: init(width, total, mines)                                       //
+   10  //                                                                        //
+   11  ////////////////////////////////////////////////////////////////////////////
+   12  
+   13  var width;                          // set by calling "init"
+   14  var total;                          // set by calling "init"
+   15  var mines;                          // set by calling "init"
+   16  
+   17  
+   18  /* "adjacent" and "exposed" are indexed by square number = y*width+x */
+   19    
+   20  /* "adjacent" contains the board layout and derived state.  adjacent[i] is
+   21     the count of mines adjacent to square i, or "mine" if square i contains
+   22     a mine.  */
+   23  var adjacent = new Array();         // count of adjacent mines
+   24  var mine = 9;                       // adjacency count for a mine
+   25    
+   26  /* "exposed" contains the exposure state of the board.
+   27     Values > "unexposed" represent exposed squares; these either have the
+   28     distinquished values "exploded" or "incorrect", or some greater value
+   29     (left over from the pending exposure queue) for plain old exposed
+   30     squares.  Values <= "unexposed" include plain old unexposed squares, or
+   31     one of the markers.
+   32  
+   33     During the "expose" method, the queue of pending exposures is a linked
+   34     list through this array, using array indexes.  The method holds the head
+   35     and tail.  "listEnd" is the tail marker.
+   36  */
+   37  var exposed = new Array();          // exposure state / pending exposures
+   38  var listEnd = -1;                   // end marker in "exposed"
+   39  var incorrect = -2;                 // incorrect flag, at end of game
+   40  var exploded = -3;                  // exploded mine (at end of game!)
+   41  var unexposed = -4;                 // default state at start of game
+   42  var flagged = -5;                   // marker flag by user
+   43  var queried = -6;                   // query flag by user
+   44  
+   45  var erasing = 0;                    // smiley absent during initialization
+   46  var sad = 1;                        // smiley value after loss
+   47  var bored = 2;                      // smiley value during game
+   48  var happy = 3;                      // smiley value after win
+   49    
+   50  var flags = 0;                      // count of flags currently set
+   51  var remaining = 0;                  // count of unexposed squares
+   52  var sadness = happy;                // whether smiley is sad
+   53  var startTime;                      // time of first click, if any
+   54  var timer = false;                  // periodic elapsed time updater
+   55  
+   56  var charInfinity = "&#x221E;";
+   57  var charFlag = "!";                 // or 2691, but not on Windows
+   58  var charQuestion = "?";
+   59  var charMine = "&#x2600;";
+   60  var charIncorrect = "&#x00D7;";
+   61  
+   62  function setMines() {
+   63      // update remaining mines display
+   64      var elt = document.getElementById("mines");
+   65      var count = mines - flags;
+   66      elt.innerHTML = (count < -99 ? "-" + charInfinity : "" + count);
+   67  }
+   68  
+   69  function setElapsed() {
+   70      // update elapsed time display
+   71      var elt = document.getElementById("timer");
+   72      if (timer) {
+   73          var now = new Date();
+   74          var secs = Math.floor((now.getTime() - startTime.getTime())/1000);
+   75          elt.innerHTML = (secs > 999 ? charInfinity : "" + secs);
+   76      } else {
+   77          elt.innerHTML = "&nbsp;";
+   78      }
+   79  }
+   80  
+   81  function setHappy() {
+   82      // update the happy/sad icon display
+   83      var smiley = document.getElementById("smiley");
+   84      smiley.src =
+   85          (sadness == erasing ? "erasing.gif" :
+   86          (sadness == sad ? "sad.gif" :
+   87          (sadness == bored ? "bored.gif" :
+   88          "happy.gif")));
+   89  }
+   90  
+   91  function setSq(thisSquare) {
+   92      // update square display, based on "exposed" and "adjacent"
+   93      var sq = document.getElementById("sq-" + thisSquare);
+   94      var exp = exposed[thisSquare];
+   95      var className = "sq";
+   96      var s;
+   97      if (exp <= unexposed) {
+   98          // unexposed squares, including flagged or queried
+   99          if (exp == unexposed) {
+  100              s = "&nbsp;";
+  101          } else if (exp == flagged) {
+  102              s = charFlag;
+  103              className += " sqFlagged";
+  104          } else {
+  105              s = charQuestion;
+  106              className += " sqQuestion";
+  107          }
+  108      } else {
+  109          // exposed squares
+  110          var adj = adjacent[thisSquare];
+  111          className += " sqExposed";
+  112          if (exp == exploded) {
+  113              s = charMine;
+  114              className += " sqExploded";
+  115          } else if (exp == incorrect) {
+  116              s = charIncorrect;
+  117              className += " sqIncorrect";
+  118          } else if (adj == mine) {
+  119              s = charMine;
+  120              className += " sqMine";
+  121          } else {
+  122              s = "" + (adj == 0 ? "&nbsp;" : adj);
+  123              className += " sq" + adj;
+  124          }
+  125      }
+  126      sq.className = className;
+  127      sq.innerHTML = s;
+  128  }
+  129  
+  130  function timerAction() {
+  131      // Called via setTimeout
+  132      // Update the elapsed time, and schedule another call if wanted
+  133      // Note: setInterval is similar, but stops (Safarai 1.3) after
+  134      // user has navigated away then returned to the page.
+  135      if (timer) {
+  136          setElapsed();
+  137          setTimeout("timerAction()", 100);
+  138      }
+  139  }
+  140  
+  141  function startTimer() {
+  142      startTime = new Date();
+  143      timer = true;
+  144      timerAction();
+  145  }
+  146  
+  147  function endGame(outcome) {
+  148      // Turn off the timer and update the smiley
+  149      timer = false;
+  150      sadness = outcome;
+  151      setHappy();
+  152  }
+  153  
+  154  function applyToNeighbours(thisSquare, f) {
+  155      // Apply given function to each existing neighbours of given square
+  156      // This is the only part of the program that knows the topology
+  157      // The performance of this function has a visible effect on the program
+  158      var x = thisSquare % width;
+  159      if (thisSquare >= width) { // there's a row above
+  160          if (x > 0) f(thisSquare - width - 1);
+  161          f(thisSquare - width);
+  162          if (x+1 < width) f(thisSquare - width + 1);
+  163      }
+  164      if (x > 0) f(thisSquare - 1);
+  165      if (x+1 < width) f(thisSquare + 1);
+  166      if (thisSquare < total-width) { // there's a row below
+  167          if (x > 0) f(thisSquare + width - 1);
+  168          f(thisSquare + width);
+  169          if (x+1 < width) f(thisSquare + width + 1);
+  170      }
+  171  }
+  172  
+  173  var tail = listEnd;                  // tail of pending exposures
+  174  
+  175  function expose1(thisSquare) {
+  176      // Expose square and add to pending exposure list.
+  177      if (exposed[thisSquare] <= unexposed &&
+  178                                          exposed[thisSquare] != flagged) {
+  179          remaining--;
+  180          exposed[thisSquare] = listEnd;
+  181          exposed[tail] = thisSquare;
+  182          tail = thisSquare;
+  183          setSq(thisSquare);
+  184      }
+  185  }
+  186  
+  187  function clickSq(event, thisSquare) {
+  188      if (!event) event = window.event; // IE versus the rest
+  189      if (sadness != bored) return false; // Game over: do nothing
+  190      if (!timer) startTimer();
+  191      if (exposed[thisSquare] > unexposed) {
+  192          // already exposed: do nothing
+  193      } else if (!event.which && event.button == 0) {
+  194          // mouse-up after right-click on IE: do nothing
+  195      } else if (event.shiftKey || event.button == 2) {
+  196          // flag or unflag
+  197          var exp = exposed[thisSquare];
+  198          if (exp == unexposed) {
+  199              exposed[thisSquare] = flagged;
+  200              flags++;
+  201              setMines();
+  202          } else if (exp == flagged) {
+  203              exposed[thisSquare] = queried;
+  204              flags--;
+  205              setMines();
+  206          } else if (exp == queried) {
+  207              exposed[thisSquare] = unexposed;
+  208          }
+  209          setSq(thisSquare);
+  210      } else if (adjacent[thisSquare] == mine) {
+  211          // exposing a mine: explode it and expose other mines
+  212          remaining--;
+  213          exposed[thisSquare] = exploded;
+  214          setSq(thisSquare);
+  215          var i;
+  216          for (i = 0; i < total; i++) {
+  217              if (i==thisSquare) {
+  218              } else if (adjacent[i] == mine && exposed[i] != flagged) {
+  219                  remaining--;
+  220                  exposed[i] = listEnd;
+  221                  setSq(i);
+  222              } else if (adjacent[i] != mine && exposed[i] == flagged) {
+  223                  remaining--;
+  224                  exposed[i] = incorrect;
+  225                  setSq(i);
+  226              }
+  227          }
+  228          endGame(sad);
+  229      } else {
+  230          // expose the square, if not already exposed
+  231          // If square has 0 adjacency, expose surrounding squares,
+  232          // and iterate
+  233          if (exposed[thisSquare] == flagged) {
+  234              flags--;
+  235              setMines();
+  236          }
+  237          remaining--;
+  238          exposed[thisSquare] = listEnd;
+  239          tail = thisSquare;
+  240          setSq(thisSquare);
+  241          var pending = thisSquare;
+  242          // Until pending reaches the end of the exposure list, expose
+  243          // neighbors
+  244          while (pending != listEnd) {
+  245              if (adjacent[pending]==0) applyToNeighbours(pending, expose1);
+  246              pending = exposed[pending];
+  247          }
+  248          if (remaining==mines) {
+  249              // End of game: flag all remaining unflagged mines
+  250              var i;
+  251              for (i = 0; i < total; i++) {
+  252                  if (adjacent[i] == mine && exposed[i] <= unexposed &&
+  253                                                  exposed[i] != flagged ) {
+  254                      exposed[i] = flagged;
+  255                      flags++;
+  256                      setSq(i);
+  257                  }
+  258              }
+  259              setMines();
+  260              endGame(happy);
+  261          }
+  262      }
+  263      return false;
+  264  }
+  265  
+  266  function neighbourIsMine(thisSquare) {
+  267      // Increase adjacency count, if this isn't itself a mine
+  268      if (adjacent[thisSquare] != mine) adjacent[thisSquare]++;
+  269  }
+  270  
+  271  function layMines() {
+  272      // Lay the mines
+  273      var laid = 0;
+  274      while (laid < mines) {
+  275          var target = Math.floor(Math.random() * total);
+  276          // Despite what others might say, it's possible that "target
+  277          // = total".  This is because although Math.random() is < 1,
+  278          // in an extreme case the multiplication by "total" will round up.
+  279          // We need to allow for this, if we really care about correctness.
+  280          if (target < total && adjacent[target] != mine) {
+  281              adjacent[target] = mine;
+  282              applyToNeighbours(target, neighbourIsMine);
+  283              laid++;
+  284          }
+  285      }
+  286  }
+  287  
+  288  function eraseRows() {
+  289      // erase square contents
+  290      var i;
+  291      for (i = 0; i < total; i++) {
+  292          adjacent[i] = 0;
+  293          if (exposed[i] != unexposed) {
+  294              exposed[i] = unexposed;
+  295              setSq(i);
+  296          }
+  297      }
+  298  }
+  299  
+  300  function erase2() {
+  301      // Forked part of erase
+  302      eraseRows();
+  303      layMines();
+  304      sadness = bored;
+  305      setHappy();
+  306      return false;
+  307  }
+  308  
+  309  function erase() {
+  310      // Erase the board.  Uses "sadness" to disable clicks meanwhile
+  311      if (sadness != erasing) {
+  312          flags = 0;
+  313          setMines();
+  314          remaining = total;
+  315          endGame(erasing);
+  316          setElapsed();
+  317          setTimeout("erase2()", 1); // allow repaint of score area
+  318      }
+  319  }
+  320  
+  321  function clickSmiley(event) {
+  322      // Click in the smiley face.
+  323      if (!event) event = window.event; // IE versus the rest
+  324      if (event.button != 2) erase();
+  325      return false;
+  326  }
+  327  
+  328  function noContext() {
+  329      // Disable context menu in squares
+  330      return false;
+  331  }
+  332  
+  333  function init(w, t, m) {
+  334      // Initial "onload" setup.  Set up globals and handlers, then erase.
+  335      //
+  336      width = w;
+  337      total = t;
+  338      mines = m;
+  339  
+  340      // The handlers here are non-standard and fail w3.org validation if
+  341      // placed in the HTML.  Onselectstart prevents IE extending a selection
+  342      // on shift-click, and oncontextmenu prevents right-click being grabbed
+  343      // for context menus on some browsers.
+  344      var sqTable = document.getElementById("sqTable");
+  345      sqTable.onselectstart = function() { return false; };
+  346      var i;
+  347      for (i = 0; i < total; i++) {
+  348          var sq = document.getElementById("sq-" + i);
+  349          sq.oncontextmenu = noContext;
+  350      }
+  351      erase();
+  352  }
